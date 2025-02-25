@@ -51,12 +51,20 @@ USE DWH;
 
 GO
 
--- Step 1: Create Staging Schema and Tables
+-- Anlegen von Staging Schema und Tables
 CREATE SCHEMA Staging_HumanResources;
 
 GO
 
 CREATE SCHEMA HumanResources;
+
+GO
+
+CREATE SCHEMA Staging_Sales;
+
+GO
+
+CREATE SCHEMA sales;
 
 GO
 
@@ -93,12 +101,54 @@ CREATE TABLE Staging_HumanResources.EmployeeDepartmentHistory (
     ModifiedDate DATETIME
 );
 
+-- Staging Table für Product
+CREATE TABLE Staging_Sales.Product (
+    ProductNumber VARCHAR(25) PRIMARY KEY,
+    Name VARCHAR(50),
+    MakeFlag BIT
+);
+
+-- Staging Table für Customer
+CREATE TABLE Staging_Sales.Customer (
+    CustomerID INT PRIMARY KEY,
+    Title VARCHAR(10),
+    FirstName VARCHAR(50),
+    MiddleName VARCHAR(50),
+    LastName VARCHAR(50)
+);
+
+-- Staging Table für Territory
+CREATE TABLE Staging_Sales.Territory (
+    TerritoryID INT PRIMARY KEY,
+    Name VARCHAR(50),
+    Country VARCHAR(10),
+    [Group] VARCHAR(50)
+);
+
+-- Staging Table für Date
+CREATE TABLE Staging_Sales.Date (
+    OrderDate DATE,
+    DueDate DATE,
+    ShipDate DATE
+);
+
+-- Staging Table für Sales
+CREATE TABLE Staging_Sales.Sales (
+    TerritoryID INT,
+    ProductNumber VARCHAR(25),
+    CustomerID INT,
+    OrderDate DATE,
+    OrderQty INT,
+    UnitPrice MONEY,
+    LineTotal MONEY
+);
+
 /*
 Ab hier ist der eigentliche Auftrag die Daten der ERP-Datenbank in Staging zu füllen. 
 Das ist einfach ersichtlich mit folgenden Befehlen "INSERT INTO, SELECT & FROM"
 */
 
--- Step 2: Copy Data from ERP to Staging
+-- Daten kopieren vom ERP in das Staging HR
 INSERT INTO Staging_HumanResources.Employee
 SELECT 
     BusinessEntityID, 
@@ -128,13 +178,47 @@ SELECT
     ModifiedDate
 FROM [ERP].HumanResources.EmployeeDepartmentHistory;
 
+GO
+
+-- Daten kopieren vom ERP in das Staging PS
+INSERT INTO Staging_Sales.Product (ProductNumber, Name, MakeFlag)
+SELECT ProductNumber, Name, MakeFlag
+FROM [ERP].Production.Product;
+
+INSERT INTO Staging_Sales.Customer (CustomerID, Title, FirstName, MiddleName, LastName)
+SELECT C.CustomerID, P.Title, P.FirstName, P.MiddleName, P.LastName
+FROM ERP.Sales.Customer AS C
+INNER JOIN ERP.Person.Person AS P ON C.PersonID = P.BusinessEntityID;
+
+INSERT INTO Staging_Sales.Territory (TerritoryID, Name, Country, [Group])
+SELECT TerritoryID, Name, CountryRegionCode, [Group]
+FROM [ERP].Sales.SalesTerritory;
+
+INSERT INTO Staging_Sales.Date (OrderDate, DueDate, ShipDate)
+SELECT DISTINCT OrderDate, DueDate, ShipDate
+FROM [ERP].Sales.SalesOrderHeader;
+
+INSERT INTO Staging_Sales.Sales (TerritoryID, ProductNumber, CustomerID, OrderDate, OrderQty, UnitPrice, LineTotal)
+SELECT 
+    SOH.TerritoryID,
+    P.ProductNumber,
+    C.CustomerID,
+    SOH.OrderDate,
+    SOD.OrderQty,
+    SOD.UnitPrice,
+    SOD.LineTotal
+FROM [ERP].Sales.SalesOrderHeader SOH
+JOIN [ERP].Sales.SalesOrderDetail SOD ON SOH.SalesOrderID = SOD.SalesOrderID
+JOIN [ERP].Production.Product P ON SOD.ProductID = P.ProductID
+JOIN [ERP].Sales.Customer C ON SOH.CustomerID = C.CustomerID;
+
+GO
+
 /*
 Nun müssen wir zuerst die Dimensionen und und Faktenrtabellen anlegen, bevor wir sie mir den Informationen befüllen die wir aus dem ERP ins Staging geladen haben.
-
-WICHTIG: Schema für "HumanResources" muss zu beginn auch erstellt werden, Staging_HumanResources reicht nicht.
 */
 
--- Anlegen Dimension "Department"
+-- Anlegen der Dimension "Department"
 CREATE TABLE HumanResources.DimDepartment (
     DepartmentID INT PRIMARY KEY,
     Name VARCHAR(50),
@@ -143,13 +227,53 @@ CREATE TABLE HumanResources.DimDepartment (
 
 GO
 
--- Dimension "Employee" with ModifiedDate
+-- Anlegen der Dimension "Employee" with ModifiedDate
 CREATE TABLE HumanResources.DimEmployee (
     BusinessEntityID INT PRIMARY KEY,
     JobTitle VARCHAR(50),
     BirthDate DATE,
     Gender CHAR(1) CHECK (Gender IN ('M', 'F', 'U')),
     ModifiedDate DATETIME
+);
+
+GO
+
+-- Anlegen der Dimension "Product"
+CREATE TABLE sales.DimProduct (
+    ProductNumber VARCHAR(25) PRIMARY KEY,
+    Name VARCHAR(50),
+    MakeFlag BIT
+);
+
+GO
+
+-- Anlegen der Dimension "Customer"
+CREATE TABLE sales.DimCustomer (
+    CustomerID INT PRIMARY KEY,
+    Title VARCHAR(10),
+    FirstName VARCHAR(50),
+    MiddleName VARCHAR(50),
+    LastName VARCHAR(50)
+);
+
+GO
+
+-- Anlegen der Dimension "Territory"
+CREATE TABLE sales.DimTerritory (
+    TerritoryID INT PRIMARY KEY,
+    Name VARCHAR(50),
+    Country VARCHAR(10),
+    [Group] VARCHAR(50)
+);
+
+GO
+
+-- Anlegen der Dimension "Date"
+CREATE TABLE sales.DimDate (
+    DateID INT IDENTITY(1,1) PRIMARY KEY,
+    OrderDate DATE,
+    DueDate DATE,
+    ShipDate DATE
 );
 
 GO
@@ -173,11 +297,29 @@ CREATE TABLE HumanResources.FactEmployeeDepartment (
 
 GO
 
+-- Anlegen der Faktentabelle inkl. Foreign Keys zu den Dimensionen
+CREATE TABLE sales.FactSales (
+    TerritoryID INT,
+    ProductNumber VARCHAR(25),
+    CustomerID INT,
+    DateID INT,
+    OrderQty INT,
+    UnitPrice MONEY,
+    LineTotal MONEY,
+    PRIMARY KEY (TerritoryID, ProductNumber, CustomerID, DateID),
+    FOREIGN KEY (ProductNumber) REFERENCES sales.DimProduct(ProductNumber),
+    FOREIGN KEY (CustomerID) REFERENCES sales.DimCustomer(CustomerID),
+    FOREIGN KEY (TerritoryID) REFERENCES sales.DimTerritory(TerritoryID),
+    FOREIGN KEY (DateID) REFERENCES sales.DimDate(DateID)
+);
+
+GO
+
 /*
 Mit diesem Schritt werden nun die Dimensionen & Faktentabellen befüllt.
 */
 
--- Load DimEmployee
+-- Beladen für DimEmployee
 INSERT INTO HumanResources.DimEmployee (
     BusinessEntityID, 
     JobTitle, 
@@ -193,7 +335,7 @@ SELECT
     ModifiedDate
 FROM Staging_HumanResources.Employee;
 
--- Load DimDepartment
+-- Beladen für DimDepartment
 INSERT INTO HumanResources.DimDepartment (
     DepartmentID, 
     Name, 
@@ -205,7 +347,7 @@ SELECT
     GroupName
 FROM Staging_HumanResources.Department;
 
--- Load FactEmployeeDepartment
+-- Beladen für FactEmployeeDepartment
 INSERT INTO HumanResources.FactEmployeeDepartment (
     DepartmentID, 
     BusinessEntityID, 
@@ -229,7 +371,43 @@ JOIN Staging_HumanResources.Department d
 
 GO
 
--- Erstellung eines SQL Views mit bereits berechneten Daten
+-- Beladen für DimProduct
+INSERT INTO sales.DimProduct (ProductNumber, Name, MakeFlag)
+SELECT DISTINCT ProductNumber, Name, MakeFlag
+FROM Staging_Sales.Product;
+
+-- Beladen für DimCustomer
+INSERT INTO sales.DimCustomer (CustomerID, Title, FirstName, MiddleName, LastName)
+SELECT DISTINCT CustomerID, Title, FirstName, MiddleName, LastName
+FROM Staging_Sales.Customer;
+
+-- Beladen für DimTerritory
+INSERT INTO sales.DimTerritory (TerritoryID, Name, Country, [Group])
+SELECT DISTINCT TerritoryID, Name, Country, [Group]
+FROM Staging_Sales.Territory;
+
+-- Beladen für DimDate
+INSERT INTO sales.DimDate (OrderDate, DueDate, ShipDate)
+SELECT DISTINCT OrderDate, DueDate, ShipDate
+FROM Staging_Sales.Date;
+
+-- Beladen für FactSales
+INSERT INTO sales.FactSales (TerritoryID, ProductNumber, CustomerID, DateID, OrderQty, UnitPrice, LineTotal)
+SELECT 
+    s.TerritoryID,
+    s.ProductNumber,
+    s.CustomerID,
+    dd.DateID,
+    SUM(s.OrderQty) AS TotalOrderQty,
+    AVG(s.UnitPrice) AS AvgUnitPrice,
+    SUM(s.LineTotal) AS TotalLineTotal
+FROM Staging_Sales.Sales s
+JOIN sales.DimDate dd ON s.OrderDate = dd.OrderDate
+GROUP BY s.TerritoryID, s.ProductNumber, s.CustomerID, dd.DateID;
+
+GO
+
+-- Erstellung eines SQL Views (mit den berechneten Daten), damit das Star-Schema rasch abgefragt werden kann
 CREATE OR ALTER VIEW HumanResources.HumanResourcesView AS
 SELECT 
     fact.FactID,
@@ -251,6 +429,31 @@ LEFT JOIN HumanResources.DimEmployee AS emp ON fact.BusinessEntityID = emp.Busin
 
 GO
 
+CREATE OR ALTER VIEW sales.Sales AS
+SELECT  
+        fact.TerritoryID,
+        dim_ter.Name AS TerritoryName,
+        dim_ter.Country,
+        dim_ter.[Group],
+        dim_p.Name AS ProductName, 
+        dim_p.ProductNumber,
+        dim_c.CustomerID,
+        dim_c.FirstName,
+        dim_c.LastName,
+        dim_date.OrderDate,
+        dim_date.DueDate,
+        dim_date.ShipDate,
+        fact.OrderQty AS TotalOrderQty,
+        fact.LineTotal AS TotalSales, -- Aggregated sales for analysis
+        fact.UnitPrice
+FROM sales.FactSales AS fact
+LEFT JOIN sales.DimCustomer AS dim_c ON fact.CustomerID = dim_c.CustomerID
+LEFT JOIN sales.DimProduct AS dim_p ON fact.ProductNumber = dim_p.ProductNumber
+LEFT JOIN sales.DimTerritory AS dim_ter ON fact.TerritoryID = dim_ter.TerritoryID
+LEFT JOIN sales.DimDate AS dim_date ON fact.DateID = dim_date.DateID;
+
+GO
+
 /*
 Abfrage der Daten aus dem View
 */
@@ -269,5 +472,25 @@ SELECT
     Age, -- Include Age
     LatestModifiedDate -- Include LatestModifiedDate
 FROM HumanResources.HumanResourcesView;
+
+GO
+
+SELECT  
+        TerritoryID,
+        TerritoryName,
+        Country,
+        [Group],
+        ProductNumber,
+        ProductName,
+        CustomerID,
+        FirstName,
+        LastName,
+        OrderDate,
+        DueDate,
+        ShipDate,
+        TotalOrderQty,
+        TotalSales,
+        UnitPrice
+FROM sales.Sales AS sales;
 
 GO
